@@ -17,7 +17,7 @@ else:
 
 import gr4j
 
-csv_file = os.path.join(root_path,'225110.csv')
+csv_file = os.path.join(root_path,'226226.csv')
 
 tseries_df = pd.read_csv(csv_file)
 # TODO
@@ -49,19 +49,71 @@ obs_runoff_data[obs_runoff_data < 0] = np.nan
 from datetime import datetime
 
 run_start = datetime(1980, 1, 1)
+warmup_to = datetime(1982, 1, 1)
 run_end = datetime(1999, 12, 31)
 
-cal_inputs = {
+
+model_inputs = {
     'rainfall' : rainfall_data[run_start:run_end].as_matrix(),
     'pet'  : pet_data[run_start:run_end].as_matrix(),
-    # 'obs'  : obs_runoff_data[run_start:run_end].as_matrix(),
     'x1':20.0,
     'x2':0.0,
     'x3':40.0,
     'x4':0.5
 }
 
-runoff = gr4j.gr4j(**cal_inputs)
+runoff = gr4j.gr4j(**model_inputs)
 
-library(lubridate)
-ymd('1975-01-01')
+import matplotlib.pyplot as plt
+
+# p = plt.plot(runoff)
+# plt.show(p)
+
+
+
+class gr4j_lumped_spot_setup(object):
+    def __init__(self, rainfall, pet, observed_runoff):
+        self.params = [spotpy.parameter.Uniform('x1', low=1.0, high=1000.0, optguess=350),
+                       spotpy.parameter.Uniform('x2', low=-30.0, high=30.0, optguess=15),
+                       spotpy.parameter.Uniform('x3', low=1.0, high=1000.0, optguess=100),
+                       spotpy.parameter.Uniform('x4', low=1, high=240.0, optguess=10)
+                       ]
+        self.observed_runoff = observed_runoff
+        self.rainfall = rainfall
+        self.pet = pet
+    
+    def parameters(self):
+        return spotpy.parameter.generate(self.params)        
+    
+    def simulation(self,vector):
+        runoff = gr4j.gr4j(self.rainfall,self.pet, x1=vector[0], x2=vector[1], x3=vector[2], x4=vector[3]) 
+        return runoff
+        
+    def evaluation(self):
+        observations= self.observed_runoff
+        return observations
+    
+    def objectivefunction(self,simulation,evaluation):
+        objectivefunction = -spotpy.objectivefunctions.nashsutcliffe(evaluation=evaluation,simulation=simulation)
+        return objectivefunction
+
+
+
+calibration_inputs = {'obs_runoff'  : obs_runoff_data[run_start:run_end].as_matrix() }
+spotpy_setup=gr4j_lumped_spot_setup(model_inputs['rainfall'], model_inputs['pet'], calibration_inputs['obs_runoff'])
+
+spotpy_setup.objectivefunction(runoff, calibration_inputs['obs_runoff'])
+
+rep=100
+sampler=spotpy.algorithms.sceua(spotpy_setup, dbname='GR4J_test', dbformat='ram')
+
+sampler.sample(rep)
+results = sampler.getdata()
+spotpy.analyser.plot_parametertrace(results)
+
+# The following returns something that looks nonsense to me.
+print(spotpy.analyser.get_best_parameterset(results))
+
+
+
+# for cat_num in cat_identifiers:
