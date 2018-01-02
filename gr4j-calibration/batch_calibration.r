@@ -79,7 +79,7 @@ plot_obs_vs_calc <- function(calib_inputs, sim_start = NA, warmup_days = 365, n_
 create_calib_data <- function(simulation, model_property_id, simul_start, warmup_days = 365, simul_end, obs_runoff, obj_id = 'NSE') {
   simulation <- CloneModel_R(simulation)
   w <- simul_start + lubridate::days(warmup_days)
-  setSimulationSpan(simulation, sim_start, simul_end)
+  setSimulationSpan(simulation, simul_start, simul_end)
   recordState(simulation, model_property_id)
   calib_inputs = list(
     simulation = simulation,
