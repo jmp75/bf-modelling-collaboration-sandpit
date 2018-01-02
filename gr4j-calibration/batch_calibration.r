@@ -1,11 +1,12 @@
 library(readr)
 library(stringr)
-
 library(uchronia)
 library(swift)
+library(dplyr)
 
 
 ## Define functions to help concise batch optimizations
+## Most of this file is function definitions
 
 load_cat_series <- function(cat_id, root_path = 'C:/Users/per202/Documents/BF/AUS_Catchments/AUS_Catchments') {
   csv_file = file.path(root_path,paste0(cat_id, '.csv'))
@@ -44,13 +45,17 @@ get_observed_runoff <- function(series, simul_start = NA) {
 
 model_property_prefix <- 'subarea.Subarea.'
 
-get_gr4j_parameter_space <- function() {
+get_gr4j_parameter_space_df <- function() {
   pSpecGr4j <- joki::getFreeParams('GR4J')
   pSpecGr4j$Value <- c(542.1981111, 0, 7.7403390, 1.2388548)
   pSpecGr4j$Min <- c(1,-30, 1,1)
   pSpecGr4j$Max <- c(3000, 30, 1000, 10)
   pSpecGr4j$Name <- paste0(model_property_prefix, pSpecGr4j$Name)
-  p <- createParameterizer(type='Generic', pSpecGr4j)
+  return(pSpecGr4j)
+}
+
+get_gr4j_parameter_space <- function(p_space_df=get_gr4j_parameter_space_df()) {
+  p <- createParameterizer(type='Generic', p_space_df)
   return(p)
 }
 
@@ -76,7 +81,7 @@ plot_obs_vs_calc <- function(calib_inputs, sim_start = NA, warmup_days = 365, n_
   joki::plotTwoSeries(obs, calc, ylab=ylab, startTime = w, endTime = e)
 }
 
-create_calib_data <- function(simulation, model_property_id, simul_start, warmup_days = 365, simul_end, obs_runoff, obj_id = 'NSE') {
+create_calib_data <- function(simulation, model_property_id, simul_start, warmup_days = 365, simul_end, obs_runoff, obj_id = 'NSE', model_config) {
   simulation <- CloneModel_R(simulation)
   w <- simul_start + lubridate::days(warmup_days)
   setSimulationSpan(simulation, simul_start, simul_end)
@@ -88,7 +93,7 @@ create_calib_data <- function(simulation, model_property_id, simul_start, warmup
     simul_end = simul_end,
     obj_id = obj_id,
     observation = obs_runoff,
-    model_config = get_gr4j_parameter_space(),
+    model_config = model_config,
     model_property_id = model_property_id
   )
   return(calib_inputs)
@@ -106,6 +111,7 @@ calibrate <- function(calib_data, maxIterations = 10000) {
   sceParams <- SCEParameters(nparams = 4)
   urs <- createParameterSampler(0, calib_data$model_config, 'urs')
   term <- getMaxIterationTermination(maxIterations = maxIterations ) 
+  obj <- create_objective(calib_data)
   optimizer <- createSceOptimSwift(obj, term, SCEpars=sceParams, urs)
   calibLogger <- setCalibrationLogger(optimizer, '')
   startTime <- lubridate::now()
@@ -116,44 +122,32 @@ calibrate <- function(calib_data, maxIterations = 10000) {
   return(list(Results=calibResults, Optimizer=optimizer))
 }
 
-## Using functions above. compose a batch calibration workflow. Start with one.
 
-root_path <- 'C:/Users/per202/Documents/BF/AUS_Catchments/AUS_Catchments'
+calibrate_catchment <- function(cat_id, root_path, simul_start, simul_end, warmup_days, model_property, obj_id, model_config) {
+  # Define the base simulation model that will be a building block in the calibration
+  d <- load_cat_series(cat_id, root_path=root_path)
+  obs_runoff <- get_observed_runoff(d)
+  if(all(is.na(obs_runoff))) stop(paste0("Not possible to calibrate without runoff observations for catchment ", cat_id))
 
-cat_id <- "404207"
+  simulation <- create_lumped_rrmodel(d)
+  # Apply a default parameter set to the base simulation - notably to set x2 to zero in case it is not calibrated
+  applySysConfig(get_gr4j_parameter_space(), simulation)
+  # Some of the catchments seem to have no observed runoff data - catch them:
+  calib_data <- create_calib_data(simulation, model_property, simul_start, warmup_days, simul_end, obs_runoff, obj_id = obj_id, model_config = model_config)
 
-# Define the base simulation model that will be a building block in the calibration
-d <- load_cat_series(cat_id, root_path=root_path)
-simulation <- create_lumped_rrmodel(d)
-obs_runoff <- get_observed_runoff(d)
+  ## Viewing interactively:
+  # sim_start <- ISOdate(2000,1,1)
+  # plot_obs_vs_calc(calib_data, sim_start)
 
-# We can and should define a time span for the simulation, and a length of warmup for the calibration:
-simul_start <- ISOdate(1990,1,1)
-simul_end <- simul_start + lubridate::years(10) - lubridate::days(1)
-warmup_days <- 365
-
-model_property <- paste0( model_property_prefix, 'runoff')
-# Some of the catchments seem to have no observed runoff data - catch them:
-if(all(is.na(obs_runoff))) stop("Not possible to calibrate without runoff observations")
-calib_data <- create_calib_data(simulation, model_property, simul_start, warmup_days, simul_end, obs_runoff, obj_id = 'NSE')
-
-## Viewing interactively:
-# sim_start <- ISOdate(2000,1,1)
-# plot_obs_vs_calc(calib_data, sim_start)
-
-obj <- create_objective (calib_data)
-getScore(obj, get_gr4j_parameter_space())
-
-optim_results <- calibrate(calib_data)
-
-calibResults <- optim_results$Results
-sortedResults <- sortByScore(calibResults, 'NSE')
-results_df <- scoresAsDataFrame(sortedResults)
-head(results_df)
-
-
-batch_results <- list()
-batch_results[[cat_id]] = results_df[1,]
+  obj <- create_objective (calib_data)
+  # getScore(obj, get_gr4j_parameter_space())
+  optim_results <- calibrate(calib_data)
+  calibResults <- optim_results$Results
+  sortedResults <- sortByScore(calibResults, obj_id)
+  results_df <- scoresAsDataFrame(sortedResults)
+  # head(results_df)
+  return(results_df[1,])
+}
 
 # optional, details viz look at calibration logs. 
 # optimizer <- optim_results$Optimizer
@@ -163,6 +157,62 @@ batch_results[[cat_id]] = results_df[1,]
 # geomOps <- mhplot::subsetByMessage(logMh)
 # print(mhplot::plotParamEvolution(geomOps, pVarIds[1], objLims=c(0,1)))
 
-# TODO: batch loop. Note that we need to check observed data as some catchment have no runoff observations.
+
+# We need to weed out some catchment with no data point over the calibration period (or worse none at all...)
+# so a couple of functions for it:
+runoff_for_catchment <- function(cat_id, do_subset = FALSE) {
+  d <- load_cat_series(cat_id, root_path=root_path)
+  obs_runoff <- get_observed_runoff(d)
+  if(do_subset) obs_runoff <- window(obs_runoff, start=simul_start, end=simul_end)
+  obs_runoff
+}
+
+# x <- (runoff_for_catchment('225213'))
+
+catchment_has_runoff <- function(cat_id) {
+  obs_runoff <- runoff_for_catchment(cat_id, do_subset = TRUE)
+  return(!(all(is.na(obs_runoff))))
+}
+
+
+########
+# Start of the main batch commands
+########
+
+root_path <- 'C:/Users/per202/Documents/BF/AUS_Catchments/AUS_Catchments'
+
+# We can and should define a time span for the simulation, and a length of warmup for the calibration:
+simul_start <- ISOdate(1990,1,1)
+simul_end <- simul_start + lubridate::years(10) - lubridate::days(1)
+warmup_days <- 365
+model_property <- paste0( model_property_prefix, 'runoff')
+
+p_space <- get_gr4j_parameter_space_df()
+# We remove x2 from the feasible parameter space
+p_space <- p_space[c(1,3,4),]
+p_space <- get_gr4j_parameter_space(p_space)
+
+
+# # Test:
+# cat_id <- "404207"
+# blah <- calibrate_catchment(cat_id, root_path, simul_start, simul_end, warmup_days, model_property, obj_id='NSE', model_config=p_space)
+
+## Batch loop.
 short_fnames <- list.files(root_path, pattern='*.csv')
 cat_ids <- stringr::str_replace_all(short_fnames, '\\.csv', '')
+calibration_possible_catchments <- sapply(cat_ids, FUN=catchment_has_runoff)
+cat_ids <- cat_ids[calibration_possible_catchments]
+# Catchment 403224 has only zeroes for valid observations - this is a problem for NSE (and not meaninful data to calibrate against)
+cat_ids <- setdiff(cat_ids, '403224')
+
+univ_func <- function (cat_id) {
+  print(paste0("Calibrating ", cat_id))
+  calibrate_catchment(cat_id, root_path, simul_start, simul_end, warmup_days, model_property, obj_id='NSE', model_config=p_space)
+}
+batch_results = lapply(cat_ids, FUN=univ_func)
+
+batch_results = dplyr::bind_rows(batch_results)
+
+out_file = 'c:/tmp/calib_tests.csv'
+readr::write_csv(batch_results, out_file)
+
