@@ -122,35 +122,41 @@ root_path <- 'C:/Users/per202/Documents/BF/AUS_Catchments/AUS_Catchments'
 
 cat_id <- "404207"
 
+# Define the base simulation model that will be a building block in the calibration
 d <- load_cat_series(cat_id, root_path=root_path)
 simulation <- create_lumped_rrmodel(d)
 obs_runoff <- get_observed_runoff(d)
-sim_start <- ISOdate(2000,1,1)
-plot_obs_vs_calc(calib_inputs, sim_start)
 
+# We can and should define a time span for the simulation, and a length of warmup for the calibration:
 simul_start <- ISOdate(1990,1,1)
 simul_end <- simul_start + lubridate::years(10) - lubridate::days(1)
 warmup_days <- 365
 
 model_property <- paste0( model_property_prefix, 'runoff')
+# Some of the catchments seem to have no observed runoff data - catch them:
 if(all(is.na(obs_runoff))) stop("Not possible to calibrate without runoff observations")
 calib_data <- create_calib_data(simulation, model_property, simul_start, warmup_days, simul_end, obs_runoff, obj_id = 'NSE')
+
+## Viewing interactively:
+# sim_start <- ISOdate(2000,1,1)
+# plot_obs_vs_calc(calib_data, sim_start)
+
 obj <- create_objective (calib_data)
 getScore(obj, get_gr4j_parameter_space())
 
 optim_results <- calibrate(calib_data)
 
 calibResults <- optim_results$Results
-optimizer <- optim_results$Optimizer
-
 sortedResults <- sortByScore(calibResults, 'NSE')
 results_df <- scoresAsDataFrame(sortedResults)
 head(results_df)
+
 
 batch_results <- list()
 batch_results[[cat_id]] = results_df[1,]
 
 # optional, details viz look at calibration logs. 
+# optimizer <- optim_results$Optimizer
 # d <- getLoggerContent(optimizer)
 # d$PointNumber = 1:nrow(d)
 # logMh <- mhplot::mkOptimLog(d, fitness = "NSE", messages = "Message", categories = "Category") 
