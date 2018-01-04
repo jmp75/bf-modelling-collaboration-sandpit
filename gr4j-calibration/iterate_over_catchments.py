@@ -91,8 +91,8 @@ class runoff_lumped_spot_setup(object):
         else:
             # params = { **self.param_fixed, **optim_param_space } # python3.5+ way
             params = dict(list(self.param_fixed.items()) + list(optim_param_space.items())) # python 2..
-        base_simulation.model_params = params
-        runoff = base_simulation.execute_runoff()
+        self.base_simulation.model_params = params
+        runoff = self.base_simulation.execute_runoff()
         # runoff = gr4j.gr4j(self.rainfall,self.pet, x1=params['x1'], x2=params['x2'], x3=params['x3'], x4=params['x4']) 
         return runoff
     
@@ -137,6 +137,10 @@ class Gr4jSimulation:
             }
         else:
             self.model_params = model_params
+    def apply_parameters(self, parameters):
+        ks = list(set(['x1','x2','x3','x4']).intersection(parameters.keys()))
+        for k in ks:
+            self.model_params[k] = parameters[k]
     def execute_runoff(self):
         runoff = gr4j.gr4j(self.rainfall,self.pet, **(self.model_params)) 
         return runoff
@@ -177,7 +181,7 @@ class Objective:
         else:
             return self.series_subsetting(series)
     def objective_statistic(self, simulation):
-        return self.biv_func(self.observation, simulation)
+        return self.bivariate_statistic(self.observation, simulation)
     def bivariate_statistic(self, observation, simulation):
         simul_pd_series = to_daily_time_series(simulation, self.simul_start_date)
         simul_subset = self.subset_series(simul_pd_series)
@@ -237,41 +241,79 @@ def calibrate_lumped_catchment(base_simulation, objective, param_space, param_fi
 
 
 # Date range for calibration. 
-run_start = datetime(1980, 1, 1)
-warmup_to = datetime(1982, 1, 1)
-run_end = datetime(1999, 12, 31)
+run_start = datetime(1990, 1, 1)
+run_end = datetime(2009, 12, 31)
 
-csv_file = os.path.join(root_path, '226226.csv')
-pd_data = load_csv_timeseries(csv_file)
-
+def load_catchment_data(cat_id='226226'):
+    csv_file = os.path.join(root_path, cat_id + '.csv')
+    pd_data = load_csv_timeseries(csv_file)
+    return pd_data
 
 def subset_for_calib_stats(pd_series):
-    warmup_to = datetime(1982, 1, 1)
-    run_end = datetime(1999, 12, 31)
-    return pd_series[warmup_to:run_end].as_matrix()
+    subset_start = datetime(1993, 1, 1)
+    subset_end = datetime(1999, 12, 31)
+    return pd_series[subset_start:subset_end].as_matrix()
 
-nse_obj = Objective(spotpy.objectivefunctions.nashsutcliffe, pd_data['Qobs'], subset_for_calib_stats, is_maximisable=True, name="NSE")
-# Due to both BF GR4J and probably spotpy not using/suppopting 
-# fully fledged pandas time series, we have to hack things a bit to 
-# have a decent subsetting, and put that information into the Objective object.
-nse_obj.simul_start_date = run_start
+def subset_for_valid_stats(pd_series):
+    subset_start = datetime(2000, 1, 1)
+    subset_end = datetime(2009, 12, 31)
+    return pd_series[subset_start:subset_end].as_matrix()
 
+
+## Define the feasible parameter space and its complement the fix parameters
 param_space = [
                 spotpy.parameter.Uniform('x1', low=1.0, high=3000.0, optguess=300),
                 # spotpy.parameter.Uniform('x2', low=-30.0, high=30.0, optguess=x2),
                 spotpy.parameter.Uniform('x3', low=1.0, high=1000.0, optguess=40),
                 spotpy.parameter.Uniform('x4', low=1, high=20.0, optguess=1)
             ]
-
 param_fixed = {'x2': 0.0}
-base_simulation = create_simulation(pd_data, run_start, run_end)
-
-rep = 2000
+rep=1000
 # rep=10000
-best_pset = calibrate_lumped_catchment(base_simulation, nse_obj, param_space, param_fixed, max_iter=rep)
-print(best_pset)
 
-# Below is temporary code used for interactive "'"testing"
+def runnoff_with_params(base_simulation, best_pset):
+    base_simulation.apply_parameters(best_pset)
+    runoff = base_simulation.execute_runoff()
+    return runoff
+
+def calib_valid_catchment_id(cat_id):
+    pd_data = load_catchment_data(cat_id)
+    nse_obj = Objective(spotpy.objectivefunctions.nashsutcliffe, pd_data['Qobs'], subset_for_calib_stats, is_maximisable=True, name="NSE")
+    nse_valid = Objective(spotpy.objectivefunctions.nashsutcliffe, pd_data['Qobs'], subset_for_valid_stats, is_maximisable=True, name="NSE")
+    # Due to both BF GR4J and probably spotpy not using/supporting 
+    # fully fledged pandas time series, we have to hack things a bit to 
+    # have a decent subsetting, and put that information into the Objective object.
+    nse_obj.simul_start_date = run_start
+    nse_valid.simul_start_date = run_start
+    base_simulation = create_simulation(pd_data, run_start, run_end)
+    best_pset = calibrate_lumped_catchment(base_simulation, nse_obj, param_space, param_fixed, max_iter=rep)
+    runoff = runnoff_with_params(base_simulation, best_pset)
+    valid_obj = nse_valid.objective_statistic(runoff)
+    p = dict(best_pset)
+    p['NSE_valid'] = valid_obj
+    p['cat_id'] = cat_id
+    return p
+
+###
+# Batch calibration/verification
+###
+
+cat_ids = ['226226','403210']
+# 225110.csv  225219.csv  226204.csv  229661.csv  403213.csv  403222.csv  403226.csv  403244.csv  404208.csv
+# 225213.csv  226007.csv  226226.csv  403210.csv  403217.csv  403224.csv  403232.csv  404207.csv  405205.csv
+
+results = []
+for cat_id in cat_ids:
+    try:
+        p = calib_valid_catchment_id(cat_id)
+        results.append(p)
+    except:
+        pass #This is not best practice in general...
+
+calib_valid_df = pd.DataFrame.from_records(results)
+
+###########################
+# Below is temporary code used for interactive "testing"
 # adapter = runoff_lumped_spot_setup(base_simulation, nse_obj, param_space, param_fixed)
 # generated_params = adapter.parameters()
 # test_values = [x[0] for x in generated_params] 
@@ -284,6 +326,3 @@ print(best_pset)
 # observations = adapter.evaluation()
 # calibration_inputs = {'obs_runoff': pd_data['Qobs'][warmup_to:run_end].as_matrix()}
 # objective_f = adapter.objectivefunction(calibration_inputs['obs_runoff'], simul_outputs)
-
-
-# for cat_num in cat_identifiers:
