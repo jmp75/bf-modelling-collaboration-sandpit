@@ -1,7 +1,4 @@
 # Use case
-# Import CSV data
-
-# import profile
 
 import pandas as pd
 import numpy as np
@@ -11,9 +8,9 @@ import sys
 import os
 import json
 import sys
+from datetime import datetime
 
-
-if(sys.platform == 'win32'):
+if sys.platform == 'win32':
     root_src = r'C:\src\csiro\stash\bf'
     root_path = r'C:\Users\per202\Documents\BF\AUS_Catchments\AUS_Catchments'
 else:
@@ -21,47 +18,46 @@ else:
     root_path = '/home/per202/Data/BF/AUS_Catchments'
 
 sys.path.append(os.path.join(root_src, 'gr4j-sg'))
-sys.path.append(os.path.join(root_src,'reach'))
-sys.path.append(os.path.join(root_src,'watercloud-server'))
-sys.path.append(os.path.join(root_src,'watercloud-server/endpoints'))
+sys.path.append(os.path.join(root_src, 'reach'))
+sys.path.append(os.path.join(root_src, 'watercloud-server'))
+sys.path.append(os.path.join(root_src, 'watercloud-server/endpoints'))
 
 import gr4j
 
-csv_file = os.path.join(root_path,'226226.csv')
+#########################
+# Time series and dealing with CSV IO
+#########################
 
-tseries_df = pd.read_csv(csv_file)
-# TODO
-# stopifnot expected colnames 
+def to_daily_time_series(data_array, start_date):
+    tseries_index = pd.date_range(start_date, periods=len(data_array), freq='D')
+    return pd.Series(data_array, index=tseries_index)
 
-start_year = tseries_df['year'][0]
-start_month = tseries_df['month'][0]
-start_day = tseries_df['date'][0]  # date ?? anyway...
+def load_csv_timeseries(csv_file):
+    tseries_df = pd.read_csv(csv_file)
+    # TODO
+    # stopifnot expected colnames
+    start_year = tseries_df['year'][0]
+    start_month = tseries_df['month'][0]
+    start_day = tseries_df['date'][0]  # date ?? anyway...
+    tseries_len = tseries_df.shape[0] 
+    ## NOTE: use yyyy-mm-dd for date format. Pandas seems to use the silly US format instead of dd/mm/yyyy even on machines with en_AU locales. 
+    start_date = str(start_year) + '-' + str(start_month) + '-' + str(start_day)
+    # "Fun" facts: a pd.Series object cannot be at argument to pd.Series, it seems
+    rainfall_data = to_daily_time_series(tseries_df['Rain'].as_matrix(), start_date)
+    # Sanity check: does time stamps match what I see via excel? 
+    # rainfall_data.head()
+    # rainfall_data.tail()
+    pet_data = to_daily_time_series(tseries_df['Etp'].as_matrix(), start_date)
+    obs_runoff_data = to_daily_time_series(tseries_df['Qobs'].as_matrix(), start_date)
+    obs_runoff_data[obs_runoff_data < 0] = np.nan
+    df = pd.concat([rainfall_data, pet_data, obs_runoff_data], axis=1)
+    df.columns = ['Rain','Etp','Qobs'] 
+    return df
 
-tseries_len = tseries_df.shape[0] 
-
-## NOTE: use yyyy-mm-dd for date format. Pandas seems to use the silly US format for dd/mm/yyyy even on machines with en_AU locales. 
-rng = pd.date_range(str(start_year) + '-' + str(start_month) + '-' + str(start_day), periods=tseries_len, freq='D')
-
-# "Fun" facts: a pd.Series object cannot be at argument to pd.Series, it seems
-rainfall_data = pd.Series(tseries_df['Rain'].as_matrix(), index=rng)
-
-# Sanity check: does time stamps match what I see via excel? 
-rainfall_data.head()
-rainfall_data.tail()
-
-pet_data = pd.Series(tseries_df['Etp'].as_matrix(), index=rng)
-obs_runoff_data = pd.Series(tseries_df['Qobs'].as_matrix(), index=rng)
-
-obs_runoff_data[obs_runoff_data < 0] = np.nan
-
-# Date range for calibration. 
-
-from datetime import datetime
-
-run_start = datetime(1980, 1, 1)
-warmup_to = datetime(1982, 1, 1)
-run_end = datetime(1999, 12, 31)
-
+#########################
+# We define in this section some classes that will make their way into BF packages
+# For now it is easier to have them inline in this file to match offline use cases
+#########################
 
 class runoff_lumped_spot_setup(object):
     """
@@ -115,10 +111,21 @@ class runoff_lumped_spot_setup(object):
     def save(self, objectivefunctions, parameter, simulations):
         self.database.append([])
 
-import numpy as np
 
 class Gr4jSimulation:
+    """
+    A wrapper around a simulation, more convenient and more generic for calibration purposes.
+    """
     def __init__(self, rainfall, pet, model_params=None):
+        """
+            :rainfall:    rainfall series
+            :type: numpy array
+
+            :pet:    pet series
+            :type: numpy array
+
+            :model_params:  (optional) a dictionary with GR4J model parameters x 1 to 4 . 
+        """
         self.rainfall = rainfall
         self.pet = pet
         if model_params is None:
@@ -134,81 +141,64 @@ class Gr4jSimulation:
         runoff = gr4j.gr4j(self.rainfall,self.pet, **(self.model_params)) 
         return runoff
 
+
 class Objective:
     """
     A class that wraps bivariate statistics and indicates whether 
     it is a maximizable or minimizable objective in a calibration sense
     """
-    def __init__(self, bivariave_stat_function, observation, is_maximisable=False, name='objective'):
+    def __init__(self, bivariave_stat_function, observation, series_subsetting=None, is_maximisable=False, name='objective'):
+        """
+            :bivariave_stat_function:    A function that takes two numpy arrays as arguments and returns a double
+            :type: bivariate function
+
+            :observation:    A Pandas series of observations to calibrate against
+            :type: Pandas time series
+
+            :series_subsetting:    (optional)A function that subsets a pandas time series to a numpy array before stat calculations
+                                This function, if present, is applied to both observation and each simulation output.
+            :type: univariate function
+
+            :is_maximisable:    Is the bivariave_stat_function such that it is maximisable as an objective
+            :type: bool
+
+            :name:    Name of this objective.
+            :type: str
+
+        """
         self.biv_func = bivariave_stat_function
         self.is_maximisable = is_maximisable
-        self.observation = observation
+        self.series_subsetting = series_subsetting
         self.name = name
+        self.observation = self.subset_series(observation)
+    def subset_series(self, series):
+        if self.series_subsetting is None:
+            return series.as_matrix() # assumes this is a pandas series
+        else:
+            return self.series_subsetting(series)
     def objective_statistic(self, simulation):
         return self.biv_func(self.observation, simulation)
     def bivariate_statistic(self, observation, simulation):
-        return self.biv_func(observation, simulation)
-
-
-model_inputs = {
-    'rainfall' : rainfall_data[run_start:run_end].as_matrix(),
-    'pet'  : pet_data[run_start:run_end].as_matrix(),
-}
-calibration_inputs = {'obs_runoff'  : obs_runoff_data[run_start:run_end].as_matrix() }
-
-
-base_simulation = Gr4jSimulation(model_inputs['rainfall'], model_inputs['pet'], None)
-default_runoff = base_simulation.execute_runoff()
-# plt.show(default_runoff)
-
-nse_obj = Objective(spotpy.objectivefunctions.nashsutcliffe, calibration_inputs['obs_runoff'], is_maximisable=True, name="NSE")
-
-param_space = [
-                spotpy.parameter.Uniform('x1', low=1.0, high=3000.0, optguess=300),
-                # spotpy.parameter.Uniform('x2', low=-30.0, high=30.0, optguess=x2),
-                spotpy.parameter.Uniform('x3', low=1.0, high=1000.0, optguess=40),
-                spotpy.parameter.Uniform('x4', low=1, high=20.0, optguess=1)
-            ]
-
-param_fixed = {'x2': 0.0}
-
-adapter = runoff_lumped_spot_setup(base_simulation, nse_obj, param_space, param_fixed)
-
-generated_params = adapter.parameters()
-test_values = [x[0] for x in generated_params] 
-simul_outputs = adapter.simulation(test_values)
-observations = adapter.evaluation()
-objective_f = adapter.objectivefunction(calibration_inputs['obs_runoff'], simul_outputs)
-
-sampler=spotpy.algorithms.sceua(adapter, alt_objfun = None, save_sim = False, dbname='Grrr', dbformat='ram')
-# I am supposed to be able to have my own logger but the following leads to a fail
-# sampler=spotpy.algorithms.sceua(adapter)
-
-rep=500
-rep=2000
-# rep=10000
-sampler.sample(rep)
-results = sampler.getdata()
-# spotpy.analyser.plot_parametertrace(results)
-
-# best_pset = spotpy.analyser.get_best_parameterset(results)
-# print(best_pset)
-
-# for cat_num in cat_identifiers:
+        simul_pd_series = to_daily_time_series(simulation, self.simul_start_date)
+        simul_subset = self.subset_series(simul_pd_series)
+        return self.biv_func(observation, simul_subset)
 
 def get_best_in_log(log_results, obj_calc):
     """
-    Get the best parameter set of your result array, depending on your first objectivefunction 
+    A custom processing of spotpy logs to retrieve adequate information for calibration results  
     
     :log_results: Expects an numpy array which should have as first axis an index "like" or "like1". 
     :type: array  
     
-    :maximize: Optional, default=True meaning the highest objectivefunction is taken as best, if False the lowest objectivefunction is taken as best.
-    :type: boolean
+    :obj_calc: The objective used in the calibration. 
+    :type: Objective  
     
     :return: Best parameter set and objective value
     :rtype: dictionary
     """
+    # :maximize: Optional, default=True meaning the highest objectivefunction is taken as best, if False the lowest objectivefunction is taken as best.
+    # :type: boolean
+    
     maximize=True
     likes=log_results[spotpy.analyser.get_like_fields(log_results)[0]]
     if maximize:
@@ -222,11 +212,78 @@ def get_best_in_log(log_results, obj_calc):
     x[obj_calc.name] = likes[index][0]
     return x
 
+def create_simulation(pd_data, run_start, run_end):
+    model_inputs = {
+        'rainfall' : pd_data['Rain'][run_start:run_end].as_matrix(),
+        'pet'  : pd_data['Etp'][run_start:run_end].as_matrix(),
+    }
+    base_simulation = Gr4jSimulation(model_inputs['rainfall'], model_inputs['pet'], None)
+    # default_runoff = base_simulation.execute_runoff()
+    # plt.show(default_runoff)
+    return base_simulation
 
-best = get_best_in_log(results, nse_obj)
-print(best)
-test_values = list(best.values())[0:3] 
-simul_outputs = adapter.simulation(test_values)
-observations = adapter.evaluation()
-objective_f = adapter.objectivefunction(calibration_inputs['obs_runoff'], simul_outputs)
+def calibrate_lumped_catchment(base_simulation, objective, param_space, param_fixed, max_iter):
+    adapter = runoff_lumped_spot_setup(base_simulation, objective, param_space, param_fixed)
+    sampler=spotpy.algorithms.sceua(adapter, alt_objfun = None, save_sim = False, dbname='Grrr', dbformat='ram')
+    # I am supposed to be able to have my own logger but the following leads to a fail
+    # sampler=spotpy.algorithms.sceua(adapter)
+    sampler.sample(max_iter)
+    results = sampler.getdata()
+    # spotpy.analyser.plot_parametertrace(results)
+    # best_pset = spotpy.analyser.get_best_parameterset(results)
+    # print(best_pset)
+    best = get_best_in_log(results, objective)
+    return best
 
+
+# Date range for calibration. 
+run_start = datetime(1980, 1, 1)
+warmup_to = datetime(1982, 1, 1)
+run_end = datetime(1999, 12, 31)
+
+csv_file = os.path.join(root_path, '226226.csv')
+pd_data = load_csv_timeseries(csv_file)
+
+
+def subset_for_calib_stats(pd_series):
+    warmup_to = datetime(1982, 1, 1)
+    run_end = datetime(1999, 12, 31)
+    return pd_series[warmup_to:run_end].as_matrix()
+
+nse_obj = Objective(spotpy.objectivefunctions.nashsutcliffe, pd_data['Qobs'], subset_for_calib_stats, is_maximisable=True, name="NSE")
+# Due to both BF GR4J and probably spotpy not using/suppopting 
+# fully fledged pandas time series, we have to hack things a bit to 
+# have a decent subsetting, and put that information into the Objective object.
+nse_obj.simul_start_date = run_start
+
+param_space = [
+                spotpy.parameter.Uniform('x1', low=1.0, high=3000.0, optguess=300),
+                # spotpy.parameter.Uniform('x2', low=-30.0, high=30.0, optguess=x2),
+                spotpy.parameter.Uniform('x3', low=1.0, high=1000.0, optguess=40),
+                spotpy.parameter.Uniform('x4', low=1, high=20.0, optguess=1)
+            ]
+
+param_fixed = {'x2': 0.0}
+base_simulation = create_simulation(pd_data, run_start, run_end)
+
+rep = 2000
+# rep=10000
+best_pset = calibrate_lumped_catchment(base_simulation, nse_obj, param_space, param_fixed, max_iter=rep)
+print(best_pset)
+
+# Below is temporary code used for interactive "'"testing"
+# adapter = runoff_lumped_spot_setup(base_simulation, nse_obj, param_space, param_fixed)
+# generated_params = adapter.parameters()
+# test_values = [x[0] for x in generated_params] 
+# simul_outputs = adapter.simulation(test_values)
+# observations = adapter.evaluation()
+# objective_f = adapter.objectivefunction(pd_data['Qobs'][warmup_to:run_end].as_matrix(), simul_outputs)
+
+# test_values = list(best.values())[0:3] 
+# simul_outputs = adapter.simulation(test_values)
+# observations = adapter.evaluation()
+# calibration_inputs = {'obs_runoff': pd_data['Qobs'][warmup_to:run_end].as_matrix()}
+# objective_f = adapter.objectivefunction(calibration_inputs['obs_runoff'], simul_outputs)
+
+
+# for cat_num in cat_identifiers:
