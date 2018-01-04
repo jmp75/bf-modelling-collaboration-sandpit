@@ -308,7 +308,7 @@ for cat_id in cat_ids:
         p = calib_valid_catchment_id(cat_id)
         results.append(p)
     except:
-        pass #This is not best practice in general...
+        continue #This is not best practice in general...
 
 calib_valid_df = pd.DataFrame.from_records(results)
 
