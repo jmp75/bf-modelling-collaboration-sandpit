@@ -276,10 +276,14 @@ def runnoff_with_params(base_simulation, best_pset):
     runoff = base_simulation.execute_runoff()
     return runoff
 
+def nse_nan(observed, modelled):
+    valid_indices = np.where(~np.isnan(observed))
+    return spotpy.objectivefunctions.nashsutcliffe(observed[valid_indices], modelled[valid_indices])
+
 def calib_valid_catchment_id(cat_id):
     pd_data = load_catchment_data(cat_id)
-    nse_obj = Objective(spotpy.objectivefunctions.nashsutcliffe, pd_data['Qobs'], subset_for_calib_stats, is_maximisable=True, name="NSE")
-    nse_valid = Objective(spotpy.objectivefunctions.nashsutcliffe, pd_data['Qobs'], subset_for_valid_stats, is_maximisable=True, name="NSE")
+    nse_obj = Objective(nse_nan, pd_data['Qobs'], subset_for_calib_stats, is_maximisable=True, name="NSE")
+    nse_valid = Objective(nse_nan, pd_data['Qobs'], subset_for_valid_stats, is_maximisable=True, name="NSE")
     # Due to both BF GR4J and probably spotpy not using/supporting 
     # fully fledged pandas time series, we have to hack things a bit to 
     # have a decent subsetting, and put that information into the Objective object.
@@ -298,7 +302,7 @@ def calib_valid_catchment_id(cat_id):
 # Batch calibration/verification
 ###
 
-cat_ids = ['226226','403210']
+cat_ids = ['226226','403210','229661']
 # 225110.csv  225219.csv  226204.csv  229661.csv  403213.csv  403222.csv  403226.csv  403244.csv  404208.csv
 # 225213.csv  226007.csv  226226.csv  403210.csv  403217.csv  403224.csv  403232.csv  404207.csv  405205.csv
 
@@ -308,6 +312,7 @@ for cat_id in cat_ids:
         p = calib_valid_catchment_id(cat_id)
         results.append(p)
     except:
+        print("ERROR: calibration failed for " + cat_id)
         continue #This is not best practice in general...
 
 calib_valid_df = pd.DataFrame.from_records(results)
