@@ -209,10 +209,11 @@ univ_func <- function (cat_id) {
   print(paste0("Calibrating ", cat_id))
   calibrate_catchment(cat_id, root_path, simul_start, simul_end, warmup_days, model_property, obj_id='NSE', model_config=p_space)
 }
-batch_results = lapply(cat_ids, FUN=univ_func)
 
-batch_results = dplyr::bind_rows(batch_results)
-
+batch_results <- lapply(cat_ids, FUN=univ_func)
+batch_results <- dplyr::bind_rows(batch_results)
+batch_results$Catchment_ID <- cat_ids
+  
 out_file = 'c:/tmp/calib_tests.csv'
 readr::write_csv(batch_results, out_file)
 
