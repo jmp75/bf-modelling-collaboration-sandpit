@@ -1,5 +1,3 @@
-# Use case
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -32,6 +30,19 @@ def to_daily_time_series(data_array, start_date):
     tseries_index = pd.date_range(start_date, periods=len(data_array), freq='D')
     return pd.Series(data_array, index=tseries_index)
 
+# spotpy and gr4j work, for better or worse, with numpy arrays without date time indices. 
+# A function to capture the conversion, which may grow to doing more than as_matrix
+def to_numpy_array(pd_series):
+    if pd_series is np.array:
+        return pd_series
+    else:
+        return pd_series.as_matrix()  # Assumption...
+
+def concat_pandas_series(colnames, *series):
+    df = pd.concat(series, axis=1)
+    df.columns = colnames
+    return df
+
 def load_csv_timeseries(csv_file):
     tseries_df = pd.read_csv(csv_file)
     # TODO
@@ -43,16 +54,15 @@ def load_csv_timeseries(csv_file):
     ## NOTE: use yyyy-mm-dd for date format. Pandas seems to use the silly US format instead of dd/mm/yyyy even on machines with en_AU locales. 
     start_date = str(start_year) + '-' + str(start_month) + '-' + str(start_day)
     # "Fun" facts: a pd.Series object cannot be at argument to pd.Series, it seems
-    rainfall_data = to_daily_time_series(tseries_df['Rain'].as_matrix(), start_date)
+    # nevertheless there has got to be simplifications possible for the next:
+    rainfall_data = to_daily_time_series(to_numpy_array(tseries_df['Rain']), start_date)
     # Sanity check: does time stamps match what I see via excel? 
     # rainfall_data.head()
     # rainfall_data.tail()
-    pet_data = to_daily_time_series(tseries_df['Etp'].as_matrix(), start_date)
-    obs_runoff_data = to_daily_time_series(tseries_df['Qobs'].as_matrix(), start_date)
+    pet_data = to_daily_time_series(to_numpy_array(tseries_df['Etp']), start_date)
+    obs_runoff_data = to_daily_time_series(to_numpy_array(tseries_df['Qobs']), start_date)
     obs_runoff_data[obs_runoff_data < 0] = np.nan
-    df = pd.concat([rainfall_data, pet_data, obs_runoff_data], axis=1)
-    df.columns = ['Rain','Etp','Qobs'] 
-    return df
+    return concat_pandas_series( ['Rain','Etp','Qobs'], rainfall_data, pet_data, obs_runoff_data)
 
 #########################
 # We define in this section some classes that will make their way into BF packages
@@ -116,7 +126,7 @@ class Gr4jSimulation:
     """
     A wrapper around a simulation, more convenient and more generic for calibration purposes.
     """
-    def __init__(self, rainfall, pet, model_params=None):
+    def __init__(self, rainfall, pet, start_date, model_params=None):
         """
             :rainfall:    rainfall series
             :type: numpy array
@@ -128,6 +138,7 @@ class Gr4jSimulation:
         """
         self.rainfall = rainfall
         self.pet = pet
+        self.start_date = start_date
         if model_params is None:
             self.model_params = {
                 'x1': 350.0,
@@ -143,7 +154,7 @@ class Gr4jSimulation:
             self.model_params[k] = parameters[k]
     def execute_runoff(self):
         runoff = gr4j.gr4j(self.rainfall,self.pet, **(self.model_params)) 
-        return runoff
+        return to_daily_time_series(runoff, self.start_date)
 
 
 class Objective:
@@ -177,15 +188,18 @@ class Objective:
         self.observation = self.subset_series(observation)
     def subset_series(self, series):
         if self.series_subsetting is None:
-            return series.as_matrix() # assumes this is a pandas series
+            return to_numpy_array(series) # assumes this is a pandas series
         else:
             return self.series_subsetting(series)
     def objective_statistic(self, simulation):
         return self.bivariate_statistic(self.observation, simulation)
     def bivariate_statistic(self, observation, simulation):
-        simul_pd_series = to_daily_time_series(simulation, self.simul_start_date)
+        if simulation is pd.Series:
+            simul_pd_series = simulation
+        else:
+            simul_pd_series = to_daily_time_series(simulation, self.simul_start_date)
         simul_subset = self.subset_series(simul_pd_series)
-        return self.biv_func(observation, simul_subset)
+        return self.biv_func(to_numpy_array(observation), to_numpy_array(simul_subset))
 
 def get_best_in_log(log_results, obj_calc):
     """
@@ -217,11 +231,26 @@ def get_best_in_log(log_results, obj_calc):
     return x
 
 def create_simulation(pd_data, run_start, run_end):
+    """
+    Create a 'simulation' object (type Gr4jSimulation for now) given daily input climare series and a time span
+    
+    :pd_data: Pandas data frame with columns 'Rain' and 'Etp'
+    :type: Pandas data frame
+    
+    :run_start: simulation start
+    :type: datetime
+    
+    :run_end: simulation end
+    :type: datetime
+    
+    :return: a Simulation object ready to be run given parameter sets
+    :rtype: Gr4jSimulation
+    """
     model_inputs = {
-        'rainfall' : pd_data['Rain'][run_start:run_end].as_matrix(),
-        'pet'  : pd_data['Etp'][run_start:run_end].as_matrix(),
+        'rainfall' : to_numpy_array(pd_data['Rain'][run_start:run_end]),
+        'pet'  : to_numpy_array(pd_data['Etp'][run_start:run_end])
     }
-    base_simulation = Gr4jSimulation(model_inputs['rainfall'], model_inputs['pet'], None)
+    base_simulation = Gr4jSimulation(model_inputs['rainfall'], model_inputs['pet'], run_start, None)
     # default_runoff = base_simulation.execute_runoff()
     # plt.show(default_runoff)
     return base_simulation
@@ -239,11 +268,6 @@ def calibrate_lumped_catchment(base_simulation, objective, param_space, param_fi
     best = get_best_in_log(results, objective)
     return best
 
-
-# Date range for calibration. 
-run_start = datetime(1990, 1, 1)
-run_end = datetime(2009, 12, 31)
-
 def load_catchment_data(cat_id='226226'):
     csv_file = os.path.join(root_path, cat_id + '.csv')
     pd_data = load_csv_timeseries(csv_file)
@@ -252,35 +276,94 @@ def load_catchment_data(cat_id='226226'):
 def subset_for_calib_stats(pd_series):
     subset_start = datetime(1993, 1, 1)
     subset_end = datetime(1999, 12, 31)
-    return pd_series[subset_start:subset_end].as_matrix()
+    return pd_series[subset_start:subset_end]
 
 def subset_for_valid_stats(pd_series):
     subset_start = datetime(2000, 1, 1)
     subset_end = datetime(2009, 12, 31)
-    return pd_series[subset_start:subset_end].as_matrix()
+    return pd_series[subset_start:subset_end]
+
+def runoff_with_params(base_simulation, parameters):
+    base_simulation.apply_parameters(parameters)
+    runoff = base_simulation.execute_runoff()
+    return runoff
+
+def plot_modelled_observed(simulation, parameters):
+    pass
+
+def censor_missing_observations(observed, modelled):
+    valid_indices = np.where(~np.isnan(observed))
+    return (observed[valid_indices], modelled[valid_indices])
+
+def nse_log_bias(observed, modelled):
+    """
+    NSE - log bias objective function.
+    The usefulness of bias constraints in model calibration 
+    for regionalisation to ungauged catchments, 18th World IMACS / MODSIM Congress, Cairns, Australia 13-17 July 2009
+    https://www.mssanz.org.au/modsim09/I7/viney_I7a.pdf
+    """
+    if len(observed) == len(modelled):
+        nse = spotpy.objectivefunctions.nashsutcliffe(observed, modelled)
+        bias = spotpy.objectivefunctions.bias(observed, modelled)
+        return nse - 5.0 * (abs(np.log(1 + bias))) ** 2.5
+    else:
+        logging.warning("evaluation and simulation lists does not have the same length.")
+        return np.nan
+
+# functions dealing with missing values:
+
+def nse_nan(observed, modelled):
+    observed, modelled = censor_missing_observations(observed, modelled)
+    return spotpy.objectivefunctions.nashsutcliffe(observed, modelled)
+
+def nse_log_bias_nan(observed, modelled):
+    observed, modelled = censor_missing_observations(observed, modelled)
+    return nse_log_bias(observed, modelled)
 
 
+######
+# Default arguments
+######
+# default simulation span
+default_run_start = datetime(1990, 1, 1)
+default_run_end = datetime(2009, 12, 31)
 ## Define the feasible parameter space and its complement the fix parameters
-param_space = [
+default_param_space = [
                 spotpy.parameter.Uniform('x1', low=1.0, high=3000.0, optguess=300),
                 # spotpy.parameter.Uniform('x2', low=-30.0, high=30.0, optguess=x2),
                 spotpy.parameter.Uniform('x3', low=1.0, high=1000.0, optguess=40),
                 spotpy.parameter.Uniform('x4', low=1, high=20.0, optguess=1)
             ]
-param_fixed = {'x2': 0.0}
-rep=1000
-# rep=10000
+default_param_fixed = {'x2': 0.0}
+default_max_calib_iter=1000
 
-def runnoff_with_params(base_simulation, best_pset):
-    base_simulation.apply_parameters(best_pset)
-    runoff = base_simulation.execute_runoff()
-    return runoff
 
-def nse_nan(observed, modelled):
-    valid_indices = np.where(~np.isnan(observed))
-    return spotpy.objectivefunctions.nashsutcliffe(observed[valid_indices], modelled[valid_indices])
 
-def calib_valid_catchment_id(cat_id):
+def calib_valid_catchment_id(cat_id, run_start = default_run_start, run_end = default_run_end, param_space = default_param_space, param_fixed=default_param_fixed, rep=default_max_calib_iter):
+    """
+    Perform a calibration and validation for a catchment
+    
+    :cat_id: catchment id, e.g. '226226'
+    :type: string
+    
+    :run_start: simulation start
+    :type: datetime
+    
+    :run_end: simulation end
+    :type: datetime
+    
+    :param_space: feasible parameter space for the calibration
+    :type: a list of spotpy Parameter objects
+    
+    :param_fixed: fixed gr4j parameters
+    :type: dictionary e.g. {'x2': 0.0}
+    
+    :rep: maximum number of iterations in the calibration
+    :type: positive integer
+    
+    :return: composite of values for model parameters, catchment id, calibration and validation values.
+    :rtype: a dictionary
+    """
     pd_data = load_catchment_data(cat_id)
     nse_obj = Objective(nse_nan, pd_data['Qobs'], subset_for_calib_stats, is_maximisable=True, name="NSE")
     nse_valid = Objective(nse_nan, pd_data['Qobs'], subset_for_valid_stats, is_maximisable=True, name="NSE")
@@ -291,43 +374,72 @@ def calib_valid_catchment_id(cat_id):
     nse_valid.simul_start_date = run_start
     base_simulation = create_simulation(pd_data, run_start, run_end)
     best_pset = calibrate_lumped_catchment(base_simulation, nse_obj, param_space, param_fixed, max_iter=rep)
-    runoff = runnoff_with_params(base_simulation, best_pset)
+    runoff = runoff_with_params(base_simulation, best_pset)
     valid_obj = nse_valid.objective_statistic(runoff)
     p = dict(best_pset)
     p['NSE_valid'] = valid_obj
     p['cat_id'] = cat_id
     return p
 
-###
-# Batch calibration/verification
-###
+def plot_observed_modelled(simulation, parameters, observation, from_date = default_run_start, to_date = default_run_end):
+    r = simulation.execute_runoff()
+    r = r[from_date:to_date]
+    obs = observation[from_date:to_date]
+    obs_mod = concat_pandas_series(['mod','obs'], r, obs)
+    # matplotlib has no simple default ways to label axes and titles???? 
+    # fig, ax = plt.subplots()
+    my_plot = plt.plot(obs_mod)
+    return(my_plot)
 
-cat_ids = ['226226','403210','229661']
-# 225110.csv  225219.csv  226204.csv  229661.csv  403213.csv  403222.csv  403226.csv  403244.csv  404208.csv
-# 225213.csv  226007.csv  226226.csv  403210.csv  403217.csv  403224.csv  403232.csv  404207.csv  405205.csv
 
-results = []
-for cat_id in cat_ids:
-    try:
-        p = calib_valid_catchment_id(cat_id)
-        results.append(p)
-    except:
-        print("ERROR: calibration failed for " + cat_id)
-        continue #This is not best practice in general...
+# ###
+# # Plotting side by side simulation outputs and observations
+# ###
 
-calib_valid_df = pd.DataFrame.from_records(results)
+obs_226226 = load_catchment_data('226226')
 
-###########################
-# Below is temporary code used for interactive "testing"
-# adapter = runoff_lumped_spot_setup(base_simulation, nse_obj, param_space, param_fixed)
-# generated_params = adapter.parameters()
-# test_values = [x[0] for x in generated_params] 
-# simul_outputs = adapter.simulation(test_values)
-# observations = adapter.evaluation()
-# objective_f = adapter.objectivefunction(pd_data['Qobs'][warmup_to:run_end].as_matrix(), simul_outputs)
+simulation_226226 = create_simulation(obs_226226, default_run_start, default_run_end)
+r = simulation_226226.execute_runoff()
+obs_runoff_226226 = obs_226226['Qobs'][default_run_start:default_run_end]
+obs_mod = concat_pandas_series(['mod','obs'], r, obs_runoff_226226)
+# matplotlib has no simple default ways to label axes and titles???? 
+# fig, ax = plt.subplots()
+my_plot = plt.plot(obs_mod)
+plt.show()
 
-# test_values = list(best.values())[0:3] 
-# simul_outputs = adapter.simulation(test_values)
-# observations = adapter.evaluation()
-# calibration_inputs = {'obs_runoff': pd_data['Qobs'][warmup_to:run_end].as_matrix()}
-# objective_f = adapter.objectivefunction(calibration_inputs['obs_runoff'], simul_outputs)
+# A data frame as we'd typically get from batch calibrations. 
+calib_valid_df = pd.DataFrame.from_records([
+    { 'NSE' : 0.672175, 'NSE_valid' : 0.564606, 'cat_id': 226226, 'x1' : 690.653397, 'x2' : 0.0, 'x3' : 54.068796, 'x4' :  1.358228},
+    { 'NSE' : 0.772028, 'NSE_valid' : 0.795753, 'cat_id': 403210, 'x1' : 722.697191, 'x2' : 0.0, 'x3' :191.163011, 'x4' :  1.99661},
+    { 'NSE' : 0.803792, 'NSE_valid' : 0.647178, 'cat_id': 229661, 'x1' : 711.087971, 'x2' : 0.0, 'x3' :185.898297, 'x4' :  2.98321   }])
+
+
+parameters = calib_valid_df[['x1','x2','x3','x4']].iloc[[0]].to_dict()
+
+my_plot = plot_observed_modelled(simulation_226226, parameters, obs_runoff_226226, from_date = default_run_start, to_date = default_run_end)
+plt.show()
+
+my_plot = plot_observed_modelled(simulation_226226, parameters, obs_runoff_226226, from_date = datetime(1993, 1, 1), to_date = datetime(1999,12, 31))
+plt.show()
+
+# ###
+# # Batch calibration/verification
+# ###
+# p = calib_valid_catchment_id('226226')
+
+
+# cat_ids = ['226226','403210','229661']
+# # 225110.csv  225219.csv  226204.csv  229661.csv  403213.csv  403222.csv  403226.csv  403244.csv  404208.csv
+# # 225213.csv  226007.csv  226226.csv  403210.csv  403217.csv  403224.csv  403232.csv  404207.csv  405205.csv
+
+# results = []
+# for cat_id in cat_ids:
+#     try:
+#         p = calib_valid_catchment_id(cat_id)
+#         results.append(p)
+#     except:
+#         print("ERROR: calibration failed for " + cat_id)
+#         continue #This is not best practice in general...
+
+# calib_valid_df = pd.DataFrame.from_records(results)
+
