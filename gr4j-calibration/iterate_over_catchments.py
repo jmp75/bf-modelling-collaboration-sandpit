@@ -301,6 +301,8 @@ def nse_log_bias(observed, modelled):
     The usefulness of bias constraints in model calibration 
     for regionalisation to ungauged catchments, 18th World IMACS / MODSIM Congress, Cairns, Australia 13-17 July 2009
     https://www.mssanz.org.au/modsim09/I7/viney_I7a.pdf
+
+    Implemented by Wira Yan
     """
     if len(observed) == len(modelled):
         nse = spotpy.objectivefunctions.nashsutcliffe(observed, modelled)
