@@ -75,6 +75,7 @@ def concat_pandas_series(colnames, *series):
     df.columns = colnames
     return df
 
+# For SILO and BOM inputs
 def load_csv_timeseries(csv_file):
     tseries_df = pd.read_csv(csv_file)
     # TODO
@@ -96,6 +97,35 @@ def load_csv_timeseries(csv_file):
     obs_runoff_data[obs_runoff_data < 0] = np.nan
     return concat_pandas_series( ['Rain','Etp','Qobs'], rainfall_data, pet_data, obs_runoff_data)
 
+# For different rainfall inputs
+def load_csv_timeseries(csv_file_rainfall, csv_file_PET_runoff):
+    # Read rainfall, PET and runoff datasets
+    tseries_df_rainfall = pd.read_csv(csv_file_rainfall)
+    tseries_df_PET_runoff = pd.read_csv(csv_file_PET_runoff)
+    # Start and end dates of rainfall, PET and runoff datasets
+    rainfall_start_date = tseries_df_rainfall['time'].iloc[0][0:10]
+    rainfall_end_date = tseries_df_rainfall['time'].iloc[-1][0:10]
+    PET_runoff_start_date = str(tseries_df_PET_runoff['year'].iloc[0]) + '-' + str(tseries_df_PET_runoff['month'].iloc[0]) + '-' + str(tseries_df_PET_runoff['date'].iloc[0])
+    PET_runoff_end_date = str(tseries_df_PET_runoff['year'].iloc[-1]) + '-' + str(tseries_df_PET_runoff['month'].iloc[-1]) + '-' + str(tseries_df_PET_runoff['date'].iloc[-1])
+    # Assigning variables to rainfall, PET and runoff datasets
+    rainfall_data = to_daily_time_series(to_numpy_array(tseries_df_rainfall['precip']), rainfall_start_date)
+    pet_data = to_daily_time_series(to_numpy_array(tseries_df_PET_runoff['Etp']), PET_runoff_start_date)
+    obs_runoff_data = to_daily_time_series(to_numpy_array(tseries_df_PET_runoff['Qobs']), PET_runoff_start_date)
+    obs_runoff_data[obs_runoff_data < 0] = np.nan
+    # Determining overlapping time series
+    if rainfall_start_date > PET_runoff_start_date:
+        overall_start_date = rainfall_start_date
+    else:
+        overall_start_date = PET_runoff_start_date
+    if rainfall_start_date > PET_runoff_start_date:
+        overall_end_date = PET_runoff_end_date
+    else:
+        overall_end_date = rainfall_end_date
+    # Cookie cutting rainfall, PET and runoff datasets
+    rainfall_data = rainfall_data[overall_start_date:overall_end_date]
+    pet_data = pet_data[overall_start_date:overall_end_date]
+    obs_runoff_data = obs_runoff_data[overall_start_date:overall_end_date]
+    return concat_pandas_series( ['Rain','Etp','Qobs'], rainfall_data, pet_data, obs_runoff_data)
 
 # In[7]:
 
