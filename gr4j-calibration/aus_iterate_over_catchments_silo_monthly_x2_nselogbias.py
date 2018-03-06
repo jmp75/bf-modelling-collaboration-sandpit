@@ -343,10 +343,6 @@ def load_catchment_data(cat_id):
     pd_data = load_csv_timeseries(csv_file)
     return pd_data
 
-def to_monthly(pd_series):
-    monthly_pd_series = pd_series.resample("M").sum()
-    return monthly_pd_series
-
 def subset_for_calib_stats(pd_series):
     subset_start = datetime(1993, 1, 1)
     subset_end = datetime(1999, 12, 31)
@@ -372,52 +368,6 @@ def runoff_with_params(base_simulation, parameters):
 
 def plot_modelled_observed(simulation, parameters):
     pass
-
-def censor_missing_observations(observed, modelled):
-    valid_indices = np.where(~np.isnan(observed))
-    return (observed[valid_indices], modelled[valid_indices])
-
-def relative_bias(observed, modelled):
-    if observed.sum() <= 0:
-        return 'Error'
-    if modelled.sum() <= 0:
-        return 'Error'
-    relative_bias = (modelled.sum() - observed.sum())/observed.sum()
-    return relative_bias
-
-def nse_log_bias(observed, modelled):
-    """
-    NSE - log bias objective function.
-    The usefulness of bias constraints in model calibration 
-    for regionalisation to ungauged catchments, 18th World IMACS / MODSIM Congress, Cairns, Australia 13-17 July 2009
-    https://www.mssanz.org.au/modsim09/I7/viney_I7a.pdf
-        .. math::
-        nse_log_bias = nse - 5.0 * (abs(log(e_{1 + bias}))) ** 2.5
-    :observed: Observed data to be compared with modelled data
-    :type: list
-    :modelled: Modelled data to be compared with observed data
-    :type: list
-    :return: Nash-Sutcliffe Effiency with log bias constraint
-    :rtype: float
-    """
-    if len(observed) == len(modelled):
-        nse = spotpy.objectivefunctions.nashsutcliffe(observed, modelled)
-        bias = relative_bias(observed, modelled)
-        return nse - 5.0 * (abs(np.log(1 + bias))) ** 2.5
-    else:
-        logging.warning("evaluation and simulation lists does not have the same length.")
-        return np.nan
-
-# functions dealing with missing values:
-
-def nse_nan(observed, modelled):
-    observed, modelled = censor_missing_observations(observed, modelled)
-    return spotpy.objectivefunctions.nashsutcliffe(observed, modelled)
-
-def nse_log_bias_nan(observed, modelled):
-    observed, modelled = censor_missing_observations(observed, modelled)
-    return nse_log_bias(observed, modelled)
-
 
 # In[10]:
 
@@ -512,7 +462,7 @@ root_path = '/home/jovyan/work/AUS_Catchments/AUS_Catchments_Inputs'
 results = []
 for cat_id in cat_ids:
     try:
-        print "The calibration and validation for catchment %s" % (cat_id)
+        print("The calibration and validation for catchment"+cat_id)
         p = calib_valid_catchment_id(cat_id)
         results.append(p)
     except:

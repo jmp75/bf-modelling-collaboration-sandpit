@@ -8,6 +8,7 @@ import json
 import sys
 from datetime import datetime
 
+
 if sys.platform == 'win32':
     root_src = r'C:\src\csiro\stash\bf'
     root_path = r'C:\Users\per202\Documents\BF\AUS_Catchments\AUS_Catchments'
@@ -21,27 +22,20 @@ sys.path.append(os.path.join(root_src, 'watercloud-server'))
 sys.path.append(os.path.join(root_src, 'watercloud-server/endpoints'))
 
 import gr4j
+from calibration.calib_tasks import *
+from calibration.statistics_bf import *
+from simulation.runoff import *
 
 #########################
 # Time series and dealing with CSV IO
 #########################
 
-def to_daily_time_series(data_array, start_date):
-    tseries_index = pd.date_range(start_date, periods=len(data_array), freq='D')
-    return pd.Series(data_array, index=tseries_index)
-
+# Following functions moved to main BF codebase
+# def to_daily_time_series(data_array, start_date):
 # spotpy and gr4j work, for better or worse, with numpy arrays without date time indices. 
 # A function to capture the conversion, which may grow to doing more than as_matrix
-def to_numpy_array(pd_series):
-    if pd_series is np.array:
-        return pd_series
-    else:
-        return pd_series.as_matrix()  # Assumption...
-
-def concat_pandas_series(colnames, *series):
-    df = pd.concat(series, axis=1)
-    df.columns = colnames
-    return df
+# def to_numpy_array(pd_series):
+# def concat_pandas_series(colnames, *series):
 
 def load_csv_timeseries(csv_file):
     tseries_df = pd.read_csv(csv_file)
@@ -63,172 +57,6 @@ def load_csv_timeseries(csv_file):
     obs_runoff_data = to_daily_time_series(to_numpy_array(tseries_df['Qobs']), start_date)
     obs_runoff_data[obs_runoff_data < 0] = np.nan
     return concat_pandas_series( ['Rain','Etp','Qobs'], rainfall_data, pet_data, obs_runoff_data)
-
-#########################
-# We define in this section some classes that will make their way into BF packages
-# For now it is easier to have them inline in this file to match offline use cases
-#########################
-
-class runoff_lumped_spot_setup(object):
-    """
-    An adapter between BF GR4J (or potential other lumped models) and spotpy, to address use cases where:
-    - one or more of the 4 model parameters can be optimized 
-    - The objective function can be customized
-    """
-    def __init__(self, base_simulation, obj_calc, param_space, param_fixed=None):
-        """
-        :base_simulation:    An object of class RunoffYield, or something similar "a la Python"
-        :obj_calc:  
-        :param_space:  A list of spotpy 'parameter' objects.
-        :param_fixed:  A dictionary of values for fixed parameters 
-                e.g. {'x2': 0.0} complementing param_space
-        """
-        self.base_simulation = base_simulation
-        self.obj_calc = obj_calc
-        self.observed_runoff = obj_calc.observation
-        self.param_space = param_space
-        self.free_param_names = [ x.name for x in param_space ]
-        self.param_fixed = param_fixed
-        self.database = list()
-    
-    def parameters(self):
-        return spotpy.parameter.generate(self.param_space)
-    
-    def simulation(self,vector):
-        optim_param_space = dict(zip(self.free_param_names, vector))
-        if self.param_fixed is None:
-            params = dict(optim_param_space)
-        else:
-            # params = { **self.param_fixed, **optim_param_space } # python3.5+ way
-            params = dict(list(self.param_fixed.items()) + list(optim_param_space.items())) # python 2..
-        self.base_simulation.model_params = params
-        runoff = self.base_simulation.execute_runoff()
-        # runoff = gr4j.gr4j(self.rainfall,self.pet, x1=params['x1'], x2=params['x2'], x3=params['x3'], x4=params['x4']) 
-        return runoff
-    
-    def evaluation(self):
-        observations= self.observed_runoff
-        return observations
-    
-    def objectivefunction(self, evaluation, simulation):
-        # objectivefunction = -spotpy.objectivefunctions.nashsutcliffe(evaluation=observation,simulation=simulation)
-        stat_val = self.obj_calc.bivariate_statistic(observation=evaluation, simulation=simulation)
-        if self.obj_calc.is_maximisable:
-            return -stat_val
-        else:
-            return stat_val
-
-    def save(self, objectivefunctions, parameter, simulations):
-        self.database.append([])
-
-
-class Gr4jSimulation:
-    """
-    A wrapper around a simulation, more convenient and more generic for calibration purposes.
-    """
-    def __init__(self, rainfall, pet, start_date, model_params=None):
-        """
-            :rainfall:    rainfall series
-            :type: numpy array
-
-            :pet:    pet series
-            :type: numpy array
-
-            :model_params:  (optional) a dictionary with GR4J model parameters x 1 to 4 . 
-        """
-        self.rainfall = rainfall
-        self.pet = pet
-        self.start_date = start_date
-        if model_params is None:
-            self.model_params = {
-                'x1': 350.0,
-                'x2':   0.0,
-                'x3':  40.0,
-                'x4':   0.5
-            }
-        else:
-            self.model_params = model_params
-    def apply_parameters(self, parameters):
-        ks = list(set(['x1','x2','x3','x4']).intersection(parameters.keys()))
-        for k in ks:
-            self.model_params[k] = parameters[k]
-    def execute_runoff(self):
-        runoff = gr4j.gr4j(self.rainfall,self.pet, **(self.model_params)) 
-        return to_daily_time_series(runoff, self.start_date)
-
-
-class Objective:
-    """
-    A class that wraps bivariate statistics and indicates whether 
-    it is a maximizable or minimizable objective in a calibration sense
-    """
-    def __init__(self, bivariave_stat_function, observation, series_subsetting=None, is_maximisable=False, name='objective'):
-        """
-            :bivariave_stat_function:    A function that takes two numpy arrays as arguments and returns a double
-            :type: bivariate function
-
-            :observation:    A Pandas series of observations to calibrate against
-            :type: Pandas time series
-
-            :series_subsetting:    (optional)A function that subsets a pandas time series to a numpy array before stat calculations
-                                This function, if present, is applied to both observation and each simulation output.
-            :type: univariate function
-
-            :is_maximisable:    Is the bivariave_stat_function such that it is maximisable as an objective
-            :type: bool
-
-            :name:    Name of this objective.
-            :type: str
-
-        """
-        self.biv_func = bivariave_stat_function
-        self.is_maximisable = is_maximisable
-        self.series_subsetting = series_subsetting
-        self.name = name
-        self.observation = self.subset_series(observation)
-    def subset_series(self, series):
-        if self.series_subsetting is None:
-            return to_numpy_array(series) # assumes this is a pandas series
-        else:
-            return self.series_subsetting(series)
-    def objective_statistic(self, simulation):
-        return self.bivariate_statistic(self.observation, simulation)
-    def bivariate_statistic(self, observation, simulation):
-        if simulation is pd.Series:
-            simul_pd_series = simulation
-        else:
-            simul_pd_series = to_daily_time_series(simulation, self.simul_start_date)
-        simul_subset = self.subset_series(simul_pd_series)
-        return self.biv_func(to_numpy_array(observation), to_numpy_array(simul_subset))
-
-def get_best_in_log(log_results, obj_calc):
-    """
-    A custom processing of spotpy logs to retrieve adequate information for calibration results  
-    
-    :log_results: Expects an numpy array which should have as first axis an index "like" or "like1". 
-    :type: array  
-    
-    :obj_calc: The objective used in the calibration. 
-    :type: Objective  
-    
-    :return: Best parameter set and objective value
-    :rtype: dictionary
-    """
-    # :maximize: Optional, default=True meaning the highest objectivefunction is taken as best, if False the lowest objectivefunction is taken as best.
-    # :type: boolean
-    
-    maximize=True
-    likes=log_results[spotpy.analyser.get_like_fields(log_results)[0]]
-    if maximize:
-        best=np.nanmax(likes)
-    else:
-        best=np.nanmin(likes)
-    index=np.where(likes==best)
-    best_parameter_set = spotpy.analyser.get_parameters(log_results[index])[0]
-    parameter_names = spotpy.analyser.get_parameternames(log_results)
-    x = dict(zip(parameter_names, best_parameter_set))
-    x[obj_calc.name] = likes[index][0]
-    return x
 
 def create_simulation(pd_data, run_start, run_end):
     """
@@ -256,7 +84,7 @@ def create_simulation(pd_data, run_start, run_end):
     return base_simulation
 
 def calibrate_lumped_catchment(base_simulation, objective, param_space, param_fixed, max_iter):
-    adapter = runoff_lumped_spot_setup(base_simulation, objective, param_space, param_fixed)
+    adapter = LumpedCalibrationDefinition(base_simulation, objective, param_space, param_fixed)
     sampler=spotpy.algorithms.sceua(adapter, alt_objfun = None, save_sim = False, dbname='Grrr', dbformat='ram')
     # I am supposed to be able to have my own logger but the following leads to a fail
     # sampler=spotpy.algorithms.sceua(adapter)
@@ -273,15 +101,8 @@ def load_catchment_data(cat_id='226226'):
     pd_data = load_csv_timeseries(csv_file)
     return pd_data
 
-def subset_for_calib_stats(pd_series):
-    subset_start = datetime(1993, 1, 1)
-    subset_end = datetime(1999, 12, 31)
-    return pd_series[subset_start:subset_end]
-
-def subset_for_valid_stats(pd_series):
-    subset_start = datetime(2000, 1, 1)
-    subset_end = datetime(2009, 12, 31)
-    return pd_series[subset_start:subset_end]
+subset_for_calib_stats = ts_subsetter(datetime(1993, 1, 1), datetime(1999, 12, 31))
+subset_for_valid_stats = ts_subsetter(datetime(2000, 1, 1), datetime(2009, 12, 31))
 
 def runoff_with_params(base_simulation, parameters):
     base_simulation.apply_parameters(parameters)
@@ -290,38 +111,6 @@ def runoff_with_params(base_simulation, parameters):
 
 def plot_modelled_observed(simulation, parameters):
     pass
-
-def censor_missing_observations(observed, modelled):
-    valid_indices = np.where(~np.isnan(observed))
-    return (observed[valid_indices], modelled[valid_indices])
-
-def nse_log_bias(observed, modelled):
-    """
-    NSE - log bias objective function.
-    The usefulness of bias constraints in model calibration 
-    for regionalisation to ungauged catchments, 18th World IMACS / MODSIM Congress, Cairns, Australia 13-17 July 2009
-    https://www.mssanz.org.au/modsim09/I7/viney_I7a.pdf
-
-    Implemented by Wira Yan
-    """
-    if len(observed) == len(modelled):
-        nse = spotpy.objectivefunctions.nashsutcliffe(observed, modelled)
-        bias = spotpy.objectivefunctions.bias(observed, modelled)
-        return nse - 5.0 * (abs(np.log(1 + bias))) ** 2.5
-    else:
-        logging.warning("evaluation and simulation lists does not have the same length.")
-        return np.nan
-
-# functions dealing with missing values:
-
-def nse_nan(observed, modelled):
-    observed, modelled = censor_missing_observations(observed, modelled)
-    return spotpy.objectivefunctions.nashsutcliffe(observed, modelled)
-
-def nse_log_bias_nan(observed, modelled):
-    observed, modelled = censor_missing_observations(observed, modelled)
-    return nse_log_bias(observed, modelled)
-
 
 ######
 # Default arguments
@@ -384,7 +173,7 @@ def calib_valid_catchment_id(cat_id, run_start = default_run_start, run_end = de
     return p
 
 def plot_observed_modelled(simulation, parameters, observation, from_date = default_run_start, to_date = default_run_end):
-    r = simulation.execute_runoff()
+    r = runoff_with_params(simulation, parameters)
     r = r[from_date:to_date]
     obs = observation[from_date:to_date]
     obs_mod = concat_pandas_series(['mod','obs'], r, obs)
