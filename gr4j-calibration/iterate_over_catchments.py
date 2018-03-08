@@ -58,30 +58,7 @@ def load_csv_timeseries(csv_file):
     obs_runoff_data[obs_runoff_data < 0] = np.nan
     return concat_pandas_series( ['Rain','Etp','Qobs'], rainfall_data, pet_data, obs_runoff_data)
 
-def create_simulation(pd_data, run_start, run_end):
-    """
-    Create a 'simulation' object (type Gr4jSimulation for now) given daily input climare series and a time span
-    
-    :pd_data: Pandas data frame with columns 'Rain' and 'Etp'
-    :type: Pandas data frame
-    
-    :run_start: simulation start
-    :type: datetime
-    
-    :run_end: simulation end
-    :type: datetime
-    
-    :return: a Simulation object ready to be run given parameter sets
-    :rtype: Gr4jSimulation
-    """
-    model_inputs = {
-        'rainfall' : to_numpy_array(pd_data['Rain'][run_start:run_end]),
-        'pet'  : to_numpy_array(pd_data['Etp'][run_start:run_end])
-    }
-    base_simulation = Gr4jSimulation(model_inputs['rainfall'], model_inputs['pet'], run_start, None)
-    # default_runoff = base_simulation.execute_runoff()
-    # plt.show(default_runoff)
-    return base_simulation
+# def create_simulation(pd_data, run_start, run_end): now in /watercloud-server/simulation/runoff.py
 
 def calibrate_lumped_catchment(base_simulation, objective, param_space, param_fixed, max_iter):
     adapter = LumpedCalibrationDefinition(base_simulation, objective, param_space, param_fixed)
